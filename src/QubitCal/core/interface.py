@@ -58,6 +58,8 @@ class Calibration:
         self.name = name
         self.logger = SimpleLogger()
         self.param_keys = param_keys
+        self.dependent_param_keys = dependent_param_keys
+        self.dependent_params = np.zeros(len(dependent_param_keys))
         self.tolerance = tolerance
         self.timeout = timeout
 
@@ -75,7 +77,7 @@ class Calibration:
         return x
 
     def bad_data(self, data):
-        """determine if the data is corrupted or """
+        """determine if the data is corrupted"""
 
     def test_in_spec(self, data, target_params):
         """test if the parameter of 
@@ -85,7 +87,7 @@ class Calibration:
         return:
             result: True if the data pass, or False if the data fails
         """
-        test_params = self.analyze(self.data)
+        test_params = self.analyze(data)
         type_check_result = self.type_check(test_params, target_params)
         if type_check_result == ParamsType.BAD:
             raise(Exception("two parameters are of different type"))

@@ -10,12 +10,6 @@ class CheckDataResult(Enum):
     BAD_DATA = -1
 
 
-class DiagnoseResult(Enum):
-    SUCCESS = 1
-    FAILURE = -1
-    SUCCESS_WITH_RECALIBRATION = 0
-
-
 class CalibrationNode:
     """To Store one calibration as a node in a DAG, perform the functions of:
     Properties:
@@ -44,16 +38,21 @@ class CalibrationNode:
         self.database.initialize(self.table_name, self.calibration.param_keys)
         self.period_of_validity = timedelta(minutes=timeout)
         self.recalibrated = False
+        # flags for DFS traversing
         self.calibration_failed = False
+        self.discovered = False
 
     def check_data(self):
         """check if a calibration needs to be done, by taking limited data"""
+        self.retrieve_dependent_params()
         acquired_data = self.calibration.scan()
         if self.calibration.bad_data(acquired_data):
             return CheckDataResult.BAD_DATA
         last_params = self.database.last_params(
             self.table_name, *self.calibration.param_keys)
         if self.calibration.test_in_spec(acquired_data, last_params):
+            # if check_data is passed, also generated a database record to refresh the timestamp
+            self.update_params(last_params)
             return CheckDataResult.IN_SPEC
         else:
             return CheckDataResult.OUT_OF_SPEC
@@ -77,6 +76,23 @@ class CalibrationNode:
                              var_dict=param_dict,
                              calibration_log=self.calibration.logger.dump())
 
+    @staticmethod
+    def parse_param_key(key):
+        raw = key.split("-")
+        if len(raw) != 2:
+            raise Exception(
+                f"{key} is not in correct syntax of a parameter key (\"calibration - name\")")
+        return [s.strip() for s in raw]
+
+    def retrieve_dependent_params(self):
+        retrieved_dependent_params = list()
+        for key in self.calibration.dependent_param_keys:
+            table_name, param_key = self.parse_param_key(key)  # parse
+            retrieved_dependent_params.append(
+                *self.database.last_params(table_name, param_key))
+        # update
+        self.calibration.dependent_params = retrieved_dependent_params
+
     @property
     def timeout(self):
         """return True if the calibration has timed out and need to be redone"""
@@ -96,36 +112,52 @@ class CalibrationNode:
         if check_data_result == CheckDataResult.IN_SPEC:
             return False
         # if bad data, check whether dependents needs recalibration:
-        # if none needs to do so, return a failure (reason for bad data not found)
+        # if none needs to do so, return a failure (the reason for acquiring bad data is not found)
         elif check_data_result == CheckDataResult.BAD_DATA:
             recalibrated = [n.diagnose() for n in self.dependents]
         if not any(recalibrated):
-            raise DiagnoseFailure()
+            raise DiagnoseFailure(self.calibration.name)
         # if out of spec / dependents already been recalibrated, just do a calibration on this node and update parameters
         self.update_params(self.calibrate())
+        self.recalibrated = True
         return True
+
+    def reset_flags(self):
+        """reset all upper branch recalibrated flag to false"""
+        for node in self.dependents:
+            node.reset_flags()
+        self.recalibrated = False
+        self.discovered = False
 
     # exposed interfaces
 
+    def _maintain(self, reset=False):
+        """real and hidden implementation of maintain function
+        args:
+            reset: whether to reset calibrated flag in the end
+        """
+        if not self.discovered:
+            self.discovered = True
+            # recursive maintain dependent nodes
+            for n in self.dependents:
+                n._maintain()
+            # check_state
+            if self.check_state():
+                return
+            # check_data
+            try:
+                self.diagnose()
+            except DiagnoseFailure as e:
+                # fails if the diagnose of the node fails
+                raise MaintainFailure(self, e.node_failed)
+        if reset:
+            self.reset_flags()
+
     def maintain(self):
+        """maintain the single node all upper branch nodes by DFS recursion
+        if maintenance could not be finished, a MaintainFailure will be raised.
         """
-        maintain the single node and possible all upper branch nodes by recursion
-        return:
-            maintain status: SUCCESS(1) all nodes maintained / not necessary to maintain
-            FAILURE(0) means unable to maintain
-        """
-        # recursive maintain dependent nodes
-        for n in self.dependents:
-            n.maintain()
-        # check_state
-        if self.check_state():
-            return
-        self.recalibrated = False
-        # check_data
-        diagnose_result = self.diagnose()
-        if diagnose_result == DiagnoseResult.FAILURE:
-            # fails if the diagnose of the node fails
-            raise MaintainFailure("")
+        self._maintain(reset=True)
 
     def calibrate(self):
         """
@@ -134,6 +166,7 @@ class CalibrationNode:
         return:
             dictionary contains the mapping: parameter name -> parameter value 
         """
+        self.retrieve_dependent_params()
         acquired_data = self.calibration.scan()
         if self.calibration.bad_data(acquired_data):
             self.calibration_failed = True
