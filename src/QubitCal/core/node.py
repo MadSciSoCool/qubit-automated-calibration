@@ -10,7 +10,20 @@ class CheckDataResult(Enum):
     BAD_DATA = -1
 
 
-class CalibrationNode:
+class Node:
+    """To encapsulate basic functions as a node in a DAG"""
+
+    def __init__(self, name, dependents) -> None:
+        """ initialize a calibration node,
+        args:
+            table_name: name corresponding to the table in database record
+            dependents: list of Node, the dependent nodes in DAG
+        """
+        self.name = name
+        self.dependents = dependents
+
+
+class CalibrationNode(Node):
     """To Store one calibration as a node in a DAG, perform the functions of:
     Properties:
     1) a measurement object, whose scan could be tuned to different range and sparseness
@@ -29,14 +42,13 @@ class CalibrationNode:
             database:
             dependents: list of CalibrationNode, the dependent calibrations
         """
-        name = calibration.name
-        timeout = calibration.timeout
-        self.dependents = dependents
-        self.table_name = f"{name}_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
+        super().__init__(calibration.name, dependents)
+        # name with timestamp, corresponds to the database table name
+        self.table_name = f"{calibration.name}_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
         self.calibration = calibration
         self.database = database
         self.database.initialize(self.table_name, self.calibration.param_keys)
-        self.period_of_validity = timedelta(minutes=timeout)
+        self.period_of_validity = timedelta(minutes=calibration.timeout)
         self.recalibrated = False
         # flags for DFS traversing
         self.calibration_failed = False
@@ -87,9 +99,17 @@ class CalibrationNode:
     def retrieve_dependent_params(self):
         retrieved_dependent_params = list()
         for key in self.calibration.dependent_param_keys:
-            table_name, param_key = self.parse_param_key(key)  # parse
-            retrieved_dependent_params.append(
-                *self.database.last_params(table_name, param_key))
+            node_name, param_key = self.parse_param_key(key)  # parse
+            table_name = None
+            for p in self.dependents:
+                if p.name == node_name:
+                    table_name = p.table_name
+            if table_name:
+                retrieved_dependent_params.append(
+                    *self.database.last_params(table_name, param_key))
+            else:
+                raise CalibrationFailure(
+                    f"{node_name} not resolved in parents")
         # update
         self.calibration.dependent_params = retrieved_dependent_params
 
@@ -184,3 +204,13 @@ class CalibrationNode:
                 elif result.status == CalibrationStatus.BAD_FITTING:
                     raise CalibrationFailure(
                         "Fitted the acquired data, but with ")
+
+
+class BaseNode(Node):
+    def __init__(self, database, **kwargs):
+        super().__init__(name="Base", dependents=[])
+        self.table_name = f"Base_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
+        # write up all parameters in the database
+        database.insert(table_name=self.table_name,
+                        var_dict=kwargs,
+                        calibration_log="Base parameters insertion")

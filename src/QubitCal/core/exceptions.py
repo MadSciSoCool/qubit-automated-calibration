@@ -1,4 +1,5 @@
-from platform import node
+class ParsingFailure(Exception):
+    pass
 
 
 class CalibrationFailure(Exception):
