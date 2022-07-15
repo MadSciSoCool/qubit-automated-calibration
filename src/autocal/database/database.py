@@ -26,7 +26,7 @@ class CalibrationDatabase:
             query_result.append(self.db_con.execute(command).fetchone()[0])
         return query_result
 
-    def insert(self, table_name, var_dict, measurement_log="", calibration_log=""):
+    def insert(self, table_name, var_dict, calibration_log=""):
         # create timestamp and a new row
         timestamp = datetime.now().strftime('%Y-%m-%d-%H:%M:%S:%f')
         self.db_con.execute(

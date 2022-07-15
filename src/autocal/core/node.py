@@ -1,6 +1,5 @@
 from enum import Enum
 from datetime import datetime, timedelta
-from .interface import CalibrationStatus
 from .exceptions import DiagnoseFailure, MaintainFailure, CalibrationFailure
 
 
@@ -38,16 +37,17 @@ class CalibrationNode(Node):
     def __init__(self, calibration, database, dependents):
         """ initialize a calibration node,
         args:
-            calibration:
-            database:
+            calibration: the physical 
+            database: a CalibrationDatabase object
             dependents: list of CalibrationNode, the dependent calibrations
         """
         super().__init__(calibration.name, dependents)
         # name with timestamp, corresponds to the database table name
-        self.table_name = f"{calibration.name}_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
+        self.table_name = f"{calibration.name}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
         self.calibration = calibration
         self.database = database
-        self.database.initialize(self.table_name, self.calibration.param_keys)
+        self.database.initialize_table(
+            self.table_name, self.calibration.param_keys)
         self.period_of_validity = timedelta(minutes=calibration.timeout)
         self.recalibrated = False
         # flags for DFS traversing
@@ -57,12 +57,12 @@ class CalibrationNode(Node):
     def check_data(self):
         """check if a calibration needs to be done, by taking limited data"""
         self.retrieve_dependent_params()
-        acquired_data = self.calibration.scan()
-        if self.calibration.bad_data(acquired_data):
-            return CheckDataResult.BAD_DATA
         last_params = self.database.last_params(
             self.table_name, *self.calibration.param_keys)
-        if self.calibration.test_in_spec(acquired_data, last_params):
+        result = self.calibration.check_data(last_params)
+        if result.bad_data:
+            return CheckDataResult.BAD_DATA
+        if result.in_spec:
             # if check_data is passed, also generated a database record to refresh the timestamp
             self.update_params(last_params)
             return CheckDataResult.IN_SPEC
@@ -184,33 +184,36 @@ class CalibrationNode(Node):
         manually invoke a calibration, taking the data needed experimentally
         for a node which represents a measurement, calibrate also means manually invoke a measurement
         return:
-            dictionary contains the mapping: parameter name -> parameter value 
+            dictionary contains the mapping: parameter name -> parameter value
         """
         self.retrieve_dependent_params()
-        acquired_data = self.calibration.scan()
-        if self.calibration.bad_data(acquired_data):
+        result = self.calibration.calibrate()
+        # if bad data acquired in the measurement
+        if result.bad_data:
             self.calibration_failed = True
             raise CalibrationFailure(
                 "Bad data in a real calibration, manual inspection is required")
+        # if the data is okay
+        if result.succeeded:
+            return dict(zip(self.calibration.param_keys, result.calibrated_params))
         else:
-            result = self.calibration.analyze(acquired_data)
-            if result.succeeded:
-                return dict(zip(self.calibration.param_keys, result.calibrated_params))
-            else:
-                self.calibration_failed = True
-                if result.status == CalibrationStatus.FITTING_FAILURE:
-                    raise CalibrationFailure(
-                        "Not able to fit the acquired data")
-                elif result.status == CalibrationStatus.BAD_FITTING:
-                    raise CalibrationFailure(
-                        "Fitted the acquired data, but with ")
+            self.calibration_failed = True
+            raise CalibrationFailure(
+                f"Data analysis failed with error code [{result.error_message}]")
 
 
 class BaseNode(Node):
     def __init__(self, database, **kwargs):
         super().__init__(name="Base", dependents=[])
-        self.table_name = f"Base_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
+        self.table_name = f"Base_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
         # write up all parameters in the database
+        database.initialize_table(self.table_name, kwargs.keys())
         database.insert(table_name=self.table_name,
                         var_dict=kwargs,
                         calibration_log="Base parameters insertion")
+
+    def _maintain(self, reset=False):
+        pass
+
+    def diagnose(self):
+        return False
